@@ -78,6 +78,11 @@ st.set_page_config(page_title="Deepfake Audio Detector", layout="centered")
 st.title("Deepfake Audio Detection")
 st.write("Upload an audio file or record voice to estimate whether it is real or fake.")
 
+if "result_data" not in st.session_state:
+    st.session_state.result_data = None
+if "last_input_signature" not in st.session_state:
+    st.session_state.last_input_signature = None
+
 available_models = {
     name: paths
     for name, paths in MODEL_CANDIDATES.items()
@@ -109,39 +114,67 @@ uploaded_file = st.file_uploader("Upload audio file", type=["wav", "mp3", "flac"
 recorded_audio = None
 if hasattr(st, "audio_input"):
     st.write("Or record your voice directly:")
-    recorded_audio = st.audio_input("Record voice")
+    recorded_audio = st.audio_input("Record voice", key="recorded_audio")
 else:
     st.info("Your Streamlit version does not support microphone recording yet.")
 
 input_audio = recorded_audio if recorded_audio is not None else uploaded_file
 
-if input_audio is not None:
-    temp_path = None
-    try:
+if input_audio is None:
+    st.session_state.result_data = None
+    st.session_state.last_input_signature = None
+else:
+    audio_bytes = input_audio.getvalue()
+    input_signature = (
+        "recorded" if recorded_audio is not None else "uploaded",
+        getattr(input_audio, "name", ""),
+        len(audio_bytes),
+        model_choice,
+        fake_threshold,
+    )
+
+    if st.session_state.last_input_signature != input_signature:
+        temp_path = None
+        try:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp_file:
+                tmp_file.write(audio_bytes)
+                temp_path = tmp_file.name
+
+            prediction, fake_score, confidence, windows_used = predict_audio(
+                temp_path, model, scaler, feature_mode, fake_threshold
+            )
+            st.session_state.result_data = {
+                "audio_bytes": audio_bytes,
+                "prediction": prediction,
+                "fake_score": fake_score,
+                "confidence": confidence,
+                "windows_used": windows_used,
+                "threshold": fake_threshold,
+            }
+            st.session_state.last_input_signature = input_signature
+        except Exception as exc:
+            st.session_state.result_data = {"error": str(exc)}
+            st.session_state.last_input_signature = input_signature
+        finally:
+            if temp_path and os.path.exists(temp_path):
+                os.unlink(temp_path)
+
+result_data = st.session_state.result_data
+
+if result_data is not None:
+    if "error" not in result_data:
         st.write("Audio preview:")
-        st.audio(input_audio, format="audio/wav")
-
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp_file:
-            tmp_file.write(input_audio.read())
-            temp_path = tmp_file.name
-
-        prediction, fake_score, confidence, windows_used = predict_audio(
-            temp_path, model, scaler, feature_mode, fake_threshold
-        )
+        st.audio(result_data["audio_bytes"], format="audio/wav")
 
         st.markdown("## Result")
-        if prediction == 0:
+        if result_data["prediction"] == 0:
             st.success("Prediction: Real Voice")
         else:
             st.error("Prediction: Fake Voice")
 
-        st.write(f"Fake probability: `{fake_score:.3f}`")
-        st.write(f"Threshold used: `{fake_threshold:.2f}`")
-        st.write(f"Confidence: `{confidence:.3f}`")
-        st.write(f"Windows analyzed: `{windows_used}`")
-
-    except Exception as exc:
-        st.warning(f"Error processing this file: {exc}")
-    finally:
-        if temp_path and os.path.exists(temp_path):
-            os.unlink(temp_path)
+        st.write(f"Fake probability: `{result_data['fake_score']:.3f}`")
+        st.write(f"Threshold used: `{result_data['threshold']:.2f}`")
+        st.write(f"Confidence: `{result_data['confidence']:.3f}`")
+        st.write(f"Windows analyzed: `{result_data['windows_used']}`")
+    else:
+        st.warning(f"Error processing this file: {result_data['error']}")
